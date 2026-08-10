@@ -48,7 +48,11 @@ PLATE_CODE = {
     "Düzce": 81,
 }
 
-# Kategori -> OpenStreetMap Overpass filtre satırları (nwr = node/way/relation, birleşim otomatik tekilleştirir)
+# Kategori -> OpenStreetMap Overpass filtre satırları
+# Not: tag=deger eslesmeleri (leisure=fitness_centre gibi) indeksli ve hizli calisir.
+# Serbest metin (name regex) aramalari tum il sinirindaki HER elemani taradigi icin
+# cok pahalidir; bu yuzden bunlari sadece "node" tipiyle sinirliyoruz (way/relation
+# taramasini atlayarak buyuk illerde zaman asimini onluyoruz).
 CATEGORY_FILTERS = {
     "fitness": [
         'nwr["leisure"="fitness_centre"](area.a);',
@@ -57,29 +61,34 @@ CATEGORY_FILTERS = {
     ],
     "pilates_pt": [
         'nwr["leisure"="fitness_centre"]["sport"~"pilates|exercise"](area.a);',
-        'nwr["name"~"pilates",i](area.a);',
-        'nwr["name"~"reformer",i](area.a);',
-        'nwr["name"~"personal training",i](area.a);',
+        'node["name"~"pilates",i](area.a);',
+        'node["name"~"reformer",i](area.a);',
+        'node["name"~"personal training",i](area.a);',
     ],
     "fizyoterapi": [
         'nwr["healthcare"="physiotherapist"](area.a);',
-        'nwr["name"~"fizyoterapi",i](area.a);',
-        'nwr["name"~"fizik tedavi",i](area.a);',
+        'node["name"~"fizyoterapi",i](area.a);',
+        'node["name"~"fizik tedavi",i](area.a);',
     ],
 }
 
-MAX_RETRIES = 4
-RETRY_WAIT_S = 15
+OVERPASS_TIMEOUT_S = 120   # Overpass sorgusuna gomulu [timeout:] direktifi
+HTTP_TIMEOUT_S = 150       # requests.post icin bekleme suresi (sunucu suresinden biraz fazla olmali)
+MAX_RETRIES = 5
+RETRY_WAIT_S = 20
 REQUEST_GAP_S = 1.5
 
 
 def query_count(kod, filters):
     area_sel = f'area["ISO3166-2"="TR-{kod:02d}"]["boundary"="administrative"]->.a;'
-    body = "[out:json][timeout:60];\n" + area_sel + "\n(\n" + "\n".join(filters) + "\n);\nout count;"
+    body = (
+        f"[out:json][timeout:{OVERPASS_TIMEOUT_S}];\n"
+        + area_sel + "\n(\n" + "\n".join(filters) + "\n);\nout count;"
+    )
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.post(OVERPASS_URL, data={"data": body}, headers=HEADERS, timeout=70)
+            resp = requests.post(OVERPASS_URL, data={"data": body}, headers=HEADERS, timeout=HTTP_TIMEOUT_S)
         except requests.RequestException as e:
             print(f"  [HATA] istek başarısız ({attempt}/{MAX_RETRIES}): {e}")
             time.sleep(RETRY_WAIT_S)
