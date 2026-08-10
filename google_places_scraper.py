@@ -1,131 +1,133 @@
 """
-Google Places API (New) ile il bazında gerçek işletme sayımı.
+OpenStreetMap Overpass API ile il bazında gerçek işletme sayımı.
+TAMAMEN ÜCRETSİZ: API anahtarı, kredi kartı veya faturalandırma hesabı gerekmez.
 
-ÖNEMLİ: Bu script'i BENİM ortamımda çalıştıramıyorum çünkü sandbox'ımın genel
-internet erişimi yok (googleapis.com'a bağlanamıyorum). Bu yüzden bu dosyayı
-KENDİ bilgisayarında çalıştırman gerekiyor.
+Not: OpenStreetMap verisi gönüllü katkısına dayanır. Google Places'a göre özellikle
+küçük illerde eksik sayımlar olabilir (bazı işletmeler haritaya hiç eklenmemiş olabilir).
+Büyük şehirlerde (İstanbul, Ankara, İzmir vb.) veri kalitesi genelde daha iyidir.
+Bunu gerçek ama muhtemelen "alt sınır" (eksik sayabilen) bir tahmin olarak düşün.
 
 Kurulum:
     pip install requests
 
 Çalıştırma:
-    python3 google_places_scraper.py            # tam koşu (81 il x kategoriler)
-    python3 google_places_scraper.py --test      # sadece 3 il ile test (İstanbul, Ankara, Bayburt)
+    python3 osm_places_scraper.py            # tam koşu (81 il x kategoriler)
+    python3 osm_places_scraper.py --test      # sadece 3 il ile test (İstanbul, Ankara, Bayburt)
 
 Çıktı:
-    places_raw/{kategori}_{il}.json   -> her il+kategori için ham sonuçlar
-    places_summary.csv                -> il, kategori, gerçek işletme sayısı
-
-Maliyet uyarısı: Google Places API Text Search (New) her istek için ücretlendirir
-(Google Cloud hesabında aylık ücretsiz kredi var ama sınırlı). 81 il x ~4 sorgu x
-en fazla 3 sayfa ile tahminen birkaç yüz istek olur. Önce --test ile deneyip
-Google Cloud Console > Billing üzerinden maliyeti kontrol etmeni öneririm.
-
-Sonucu bana geri verdiğinde (places_summary.csv dosyasını paylaş), haritaları
-tahmini oranlar yerine bu gerçek sayılarla yeniden oluştururum.
+    places_summary.csv   -> il, kategori, gerçek (OSM) işletme sayısı
 """
 
-import json
-import os
+import csv
 import sys
 import time
 import requests
 from il_data import IL_DATA
 
-# --- API anahtarı: koda gömülü DEĞİL, ortam değişkeninden / GitHub Secret'tan okunuyor ---
-API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY")
-if not API_KEY:
-    sys.exit("HATA: GOOGLE_PLACES_API_KEY ortam değişkeni tanımlı değil.")
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+HEADERS = {"User-Agent": "fwturkiye-places-scraper/1.0 (contact: tuncanil92@gmail.com)"}
 
-ENDPOINT = "https://places.googleapis.com/v1/places:searchText"
-FIELD_MASK = "places.id,places.displayName,places.formattedAddress,places.location,nextPageToken"
-
-# Her ana kategori için bir veya birden fazla arama terimi (sonuçlar id'ye göre
-# birleştirilip tekilleştirilir, aynı yer birden fazla terimle eşleşse bile 1 kez sayılır)
-CATEGORIES = {
-    "fitness": ["fitness salonu", "spor salonu", "gym"],
-    "pilates_pt": ["pilates stüdyosu", "reformer pilates", "personal training stüdyosu"],
-    "fizyoterapi": ["fizyoterapi kliniği", "fizik tedavi merkezi"],
+# İl adı -> resmi plaka kodu (Overpass'ta ISO3166-2:TR alan eşlemesi için kullanılıyor)
+PLATE_CODE = {
+    "Adana": 1, "Adıyaman": 2, "Afyonkarahisar": 3, "Ağrı": 4, "Amasya": 5,
+    "Ankara": 6, "Antalya": 7, "Artvin": 8, "Aydın": 9, "Balıkesir": 10,
+    "Bilecik": 11, "Bingöl": 12, "Bitlis": 13, "Bolu": 14, "Burdur": 15,
+    "Bursa": 16, "Çanakkale": 17, "Çankırı": 18, "Çorum": 19, "Denizli": 20,
+    "Diyarbakır": 21, "Edirne": 22, "Elazığ": 23, "Erzincan": 24, "Erzurum": 25,
+    "Eskişehir": 26, "Gaziantep": 27, "Giresun": 28, "Gümüşhane": 29, "Hakkâri": 30,
+    "Hatay": 31, "Isparta": 32, "Mersin": 33, "İstanbul": 34, "İzmir": 35,
+    "Kars": 36, "Kastamonu": 37, "Kayseri": 38, "Kırklareli": 39, "Kırşehir": 40,
+    "Kocaeli": 41, "Konya": 42, "Kütahya": 43, "Malatya": 44, "Manisa": 45,
+    "Kahramanmaraş": 46, "Mardin": 47, "Muğla": 48, "Muş": 49, "Nevşehir": 50,
+    "Niğde": 51, "Ordu": 52, "Rize": 53, "Sakarya": 54, "Samsun": 55,
+    "Siirt": 56, "Sinop": 57, "Sivas": 58, "Tekirdağ": 59, "Tokat": 60,
+    "Trabzon": 61, "Tunceli": 62, "Şanlıurfa": 63, "Uşak": 64, "Van": 65,
+    "Yozgat": 66, "Zonguldak": 67, "Aksaray": 68, "Bayburt": 69, "Karaman": 70,
+    "Kırıkkale": 71, "Batman": 72, "Şırnak": 73, "Bartın": 74, "Ardahan": 75,
+    "Iğdır": 76, "Yalova": 77, "Karabük": 78, "Kilis": 79, "Osmaniye": 80,
+    "Düzce": 81,
 }
 
-RADIUS_M = 40000.0       # il merkezinden arama yarıçapı (metre) - büyük iller için yetersiz kalabilir
-MAX_PAGES = 3             # sorgu başına en fazla sayfa (sayfa başına ~20 sonuç -> üst sınır ~60)
-PAGE_WAIT_S = 2.0         # Google, nextPageToken'ın aktif olması için birkaç saniye bekleme öneriyor
-REQUEST_GAP_S = 0.3       # istekler arası kısa bekleme (rate-limit'e takılmamak için)
+# Kategori -> OpenStreetMap Overpass filtre satırları
+# Not: tag=deger eslesmeleri (leisure=fitness_centre gibi) indeksli ve hizli calisir.
+# Serbest metin (name regex) aramalari tum il sinirindaki HER elemani taradigi icin
+# cok pahalidir; bu yuzden bunlari sadece "node" tipiyle sinirliyoruz (way/relation
+# taramasini atlayarak buyuk illerde zaman asimini onluyoruz).
+CATEGORY_FILTERS = {
+    "fitness": [
+        'nwr["leisure"="fitness_centre"](area.a);',
+        'nwr["leisure"="sports_centre"]["sport"="fitness"](area.a);',
+        'nwr["shop"="fitness"](area.a);',
+    ],
+    "pilates_pt": [
+        'nwr["leisure"="fitness_centre"]["sport"~"pilates|exercise"](area.a);',
+        'node["name"~"pilates",i](area.a);',
+        'node["name"~"reformer",i](area.a);',
+        'node["name"~"personal training",i](area.a);',
+    ],
+    "fizyoterapi": [
+        'nwr["healthcare"="physiotherapist"](area.a);',
+        'node["name"~"fizyoterapi",i](area.a);',
+        'node["name"~"fizik tedavi",i](area.a);',
+    ],
+}
 
-OUT_DIR = "places_raw"
+OVERPASS_TIMEOUT_S = 120   # Overpass sorgusuna gomulu [timeout:] direktifi
+HTTP_TIMEOUT_S = 150       # requests.post icin bekleme suresi (sunucu suresinden biraz fazla olmali)
+MAX_RETRIES = 5
+RETRY_WAIT_S = 20
+REQUEST_GAP_S = 1.5
 
 
-def search_text(query, lat, lon, page_token=None):
-    headers = {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": API_KEY,
-        "X-Goog-FieldMask": FIELD_MASK,
-    }
-    body = {
-        "textQuery": query,
-        "languageCode": "tr",
-        "locationBias": {
-            "circle": {
-                "center": {"latitude": lat, "longitude": lon},
-                "radius": RADIUS_M,
-            }
-        },
-    }
-    if page_token:
-        body["pageToken"] = page_token
+def query_count(kod, filters):
+    area_sel = f'area["ISO3166-2"="TR-{kod:02d}"]["boundary"="administrative"]->.a;'
+    body = (
+        f"[out:json][timeout:{OVERPASS_TIMEOUT_S}];\n"
+        + area_sel + "\n(\n" + "\n".join(filters) + "\n);\nout count;"
+    )
 
-    resp = requests.post(ENDPOINT, headers=headers, json=body, timeout=20)
-    if resp.status_code != 200:
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.post(OVERPASS_URL, data={"data": body}, headers=HEADERS, timeout=HTTP_TIMEOUT_S)
+        except requests.RequestException as e:
+            print(f"  [HATA] istek başarısız ({attempt}/{MAX_RETRIES}): {e}")
+            time.sleep(RETRY_WAIT_S)
+            continue
+
+        if resp.status_code == 200:
+            data = resp.json()
+            elements = data.get("elements", [])
+            if elements and "tags" in elements[0]:
+                return int(elements[0]["tags"].get("total", 0))
+            return 0
+
+        if resp.status_code in (429, 504):
+            print(f"  [BEKLE] {resp.status_code} alındı, {RETRY_WAIT_S}s bekleyip tekrar denenecek ({attempt}/{MAX_RETRIES})")
+            time.sleep(RETRY_WAIT_S)
+            continue
+
         print(f"  [HATA] {resp.status_code}: {resp.text[:300]}")
-        return [], None
-    data = resp.json()
-    return data.get("places", []), data.get("nextPageToken")
+        return 0
 
-
-def collect_for_query(query, il, lat, lon):
-    results = []
-    seen_ids = set()
-    page_token = None
-    for page in range(MAX_PAGES):
-        places, page_token = search_text(f"{query} {il}", lat, lon, page_token)
-        for p in places:
-            pid = p.get("id")
-            if pid and pid not in seen_ids:
-                seen_ids.add(pid)
-                results.append(p)
-        time.sleep(REQUEST_GAP_S)
-        if not page_token:
-            break
-        time.sleep(PAGE_WAIT_S)
-    return results
+    print("  [HATA] tüm denemeler başarısız oldu, 0 olarak kaydedildi")
+    return 0
 
 
 def run(il_list):
-    os.makedirs(OUT_DIR, exist_ok=True)
-    summary_rows = []
-
+    rows = []
     for il in il_list:
-        pop, lat, lon, macfit = IL_DATA[il]
-        print(f"\n=== {il} ===")
-        for cat, queries in CATEGORIES.items():
-            merged = {}
-            for q in queries:
-                print(f"  sorgu: '{q} {il}'")
-                found = collect_for_query(q, il, lat, lon)
-                for p in found:
-                    merged[p.get("id")] = p
-            count = len(merged)
-            print(f"  -> {cat}: {count} benzersiz işletme")
-            summary_rows.append({"il": il, "kategori": cat, "sayi": count})
-            with open(os.path.join(OUT_DIR, f"{cat}_{il}.json"), "w", encoding="utf-8") as f:
-                json.dump(list(merged.values()), f, ensure_ascii=False, indent=2)
+        kod = PLATE_CODE[il]
+        print(f"\n=== {il} (TR-{kod:02d}) ===")
+        for kategori, filters in CATEGORY_FILTERS.items():
+            count = query_count(kod, filters)
+            print(f"  -> {kategori}: {count}")
+            rows.append({"il": il, "kategori": kategori, "sayi": count})
+            time.sleep(REQUEST_GAP_S)
 
-    with open("places_summary.csv", "w", encoding="utf-8") as f:
-        f.write("il,kategori,sayi\n")
-        for row in summary_rows:
-            f.write(f"{row['il']},{row['kategori']},{row['sayi']}\n")
-
+    with open("places_summary.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["il", "kategori", "sayi"])
+        writer.writeheader()
+        writer.writerows(rows)
     print("\nBitti. Özet: places_summary.csv")
 
 
