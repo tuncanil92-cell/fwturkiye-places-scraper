@@ -1,4 +1,4 @@
-name: Google Places Scrape
+name: OSM Places Scrape
 
 on:
   workflow_dispatch:
@@ -23,15 +23,11 @@ jobs:
 
       - name: Run scraper (test mode)
         if: ${{ inputs.test_mode == 'true' }}
-        env:
-          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
-        run: python google_places_scraper.py --test
+        run: python osm_places_scraper.py --test
 
       - name: Run scraper (full run)
         if: ${{ inputs.test_mode == 'false' }}
-        env:
-          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
-        run: python google_places_scraper.py
+        run: python osm_places_scraper.py
 
       - name: Upload results
         uses: actions/upload-artifact@v4
@@ -39,4 +35,3 @@ jobs:
           name: places-results
           path: |
             places_summary.csv
-            places_raw/
